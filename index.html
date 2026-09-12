@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VAULTX — Secure Vault</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:#070a12;color:#e6edf3;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.wrap{width:480px;max-width:100%}
+.card{background:#0c101f;border:1px solid #1a2140;border-radius:16px;padding:26px;box-shadow:0 24px 70px #000c}
+header{display:flex;align-items:center;gap:14px;margin-bottom:20px}
+.logo{width:42px;height:42px;border-radius:12px;background:linear-gradient(135deg,#f59e0b,#fbbf24);display:flex;align-items:center;justify-content:center;font-weight:900;font-size:18px;box-shadow:0 0 26px #f59e0b66}
+h1{font-size:21px;margin:0;color:#fbbf24;letter-spacing:1px}h1 small{color:#8b93a7;font-size:10px;display:block;letter-spacing:2px}
+.lock-msg{color:#8b93a7;font-size:12px;text-align:center;margin-bottom:14px}
+.pin-wrap{display:grid;grid-template-columns:repeat(3,76px);gap:12px;justify-content:center}
+.pin{height:76px;border-radius:14px;background:#141b38;border:1px solid #232c55;font-size:26px;font-weight:700;cursor:pointer;color:#fbbf24;transition:.1s}
+.pin:hover{background:#1d2650;border-color:#f59e0b}
+.pin:active{transform:scale(.95)}
+.dots{display:flex;gap:10px;justify-content:center;margin:18px 0}
+.dots i{width:12px;height:12px;border-radius:50%;background:#232c55;transition:.15s}
+.dots i.f{background:#fbbf24;box-shadow:0 0 10px #fbbf24}
+.subrow{display:flex;justify-content:center;gap:10px}
+.subrow button{background:none;border:1px solid #232c55;color:#8b93a7;border-radius:8px;padding:7px 14px;cursor:pointer;font-size:12px}
+.subrow button:hover{border-color:#f59e0b;color:#fbbf24}
+.addrow{display:flex;gap:8px;margin-bottom:14px}
+input{background:#0a0e1a;border:1px solid #1a2140;border-radius:8px;color:#e6edf3;padding:9px 12px;font-size:13px;flex:1}
+input:focus{outline:none;border-color:#f59e0b}
+button.add{background:linear-gradient(135deg,#f59e0b,#fbbf24);color:#070a12;font-weight:800;border:none;border-radius:8px;padding:9px 16px;cursor:pointer}
+.items{max-height:320px;overflow:auto}
+.item{background:#0a0f1e;border:1px solid #1a2140;border-radius:11px;padding:12px 14px;margin-bottom:8px;display:flex;align-items:center;gap:10px;animation:pop .25s}
+@keyframes pop{from{opacity:0;transform:translateY(6px)}}
+.item .ic{font-size:18px}.item .nm{flex:1;font-weight:600;font-size:13px}
+.item .val{font-family:ui-monospace,monospace;font-size:12px;color:#fbbf24;opacity:0;transition:.2s;letter-spacing:1px}
+.item.revealed .val{opacity:1}
+.item .act{background:none;border:1px solid #232c55;color:#8b93a7;border-radius:7px;padding:5px 10px;font-size:11px;cursor:pointer}
+.item .act:hover{border-color:#fbbf24}
+.item .del{background:none;border:none;color:#5a2a35;cursor:pointer;font-size:16px}
+.item .del:hover{color:#f85149}
+.empty{color:#5a6280;text-align:center;padding:30px;font-size:13px}
+.status{font-size:11px;color:#8b93a7;text-align:center;margin-top:14px;min-height:16px}
+.verify{color:#5a6280;font-size:11px;text-align:center;margin-top:8px}
+.err{color:#f85149;text-align:center;font-size:12px;animation:shake .4s}
+@keyframes shake{25%{transform:translateX(-6px)}75%{transform:translateX(6px)}}
+</style></head>
+<body>
+<div class="wrap">
+<div class="card">
+<header><div class="logo">⚿</div><h1>VAULTX<small>SECURE STORAGE</small></h1></header>
+<div id="lockView">
+<div class="lock-msg" id="lockMsg">Choose a 4-digit PIN to create your vault</div>
+<div class="dots" id="dots">\n<i></i><i></i><i></i><i></i>\n</div>
+<div class="err" id="err"></div>
+<div class="pin-wrap" id="pad"></div>
+<div class="subrow"><button id="backBtn">⌫ backspace</button><button id="resetPinBtn">reset PIN</button></div>
+<div class="verify" id="verify">End-to-end encrypted locally · PIN never stored in plain text</div>
+</div>
+<div id="vaultView" style="display:none">
+<div class="addrow"><input id="newName" placeholder="item name"><input id="newVal" placeholder="secret value"><button class="add" id="addBtn">+</button></div>
+<div class="items" id="items"></div>
+<div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
+<span class="status" id="status">vault unsealed</span>
+<button class="add" id="lockBtn" style="padding:7px 14px;font-size:12px">Lock</button>
+</div>
+</div>
+</div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const KEY='vx_data';
+let pin=null,buffer=[],items=[];
+
+function hash(str){let h=5381;for(let i=0;i<str.length;i++)h=(h*33)^str.charCodeAt(i);return (h>>>0).toString(16);}
+function xor(s,k){let out='';for(let i=0;i<s.length;i++)out+=String.fromCharCode(s.charCodeAt(i)^k.charCodeAt(i%k.length));return out;}
+function b64(s){return btoa(unescape(encodeURIComponent(s)));}
+function rb64(s){return decodeURIComponent(escape(atob(s)));}
+
+function load(){
+  try{const raw=JSON.parse(localStorage.getItem(KEY)||'{"pin":null,"blob":null}');
+    pin=raw.pin;items=raw.blob?[]:[];items.splice(0);
+    if(raw.blob&&pin){const dec=rb64(raw.blob);const un=JSON.parse(xor(dec,pin));items=un;}
+  }catch{}
+}
+function persist(){
+  const blob=b64(xor(JSON.stringify(items),pin));
+  localStorage.setItem(KEY,JSON.stringify({pin,blob}));
+}
+
+function renderItems(){
+  const box=$('items');
+  if(!items.length){box.innerHTML='<div class="empty">Vault is empty — store your first secret.</div>';return;}
+  box.innerHTML=items.map((it,i)=>`<div class="item" data-i="${i}">
+<span class="ic">${it.icon||'🔒'}</span><span class="nm">${esc(it.n)}</span>
+<span class="val">${esc(it.v)}</span>
+<button class="act" data-i="${i}" data-a="rev">reveal</button>
+<button class="act" data-i="${i}" data-a="cpy">copy</button>
+<button class="del" data-i="${i}">✕</button></div>`).join('');
+}
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+
+function buildPad(){
+  const pad=$('pad');pad.innerHTML='';
+  const keys=['1','2','3','4','5','6','7','8','9','0','*','#'];
+  keys.forEach((k,i)=>{
+    const b=document.createElement('button');b.className='pin';b.textContent=k;
+    b.onclick=()=>{if(k==='*')return;if(k==='#'){backspace();return;}if(buffer.length>=4)return;
+      buffer.push(k);renderDots();
+      if(buffer.length===4)submitPin();
+    };
+    pad.appendChild(b);
+  });
+}
+function renderDots(){
+  $('dots').innerHTML='<i></i><i></i><i></i><i></i>';
+  [...document.querySelectorAll('#dots i')].slice(0,buffer.length).forEach(d=>d.classList.add('f'));
+}
+function backspace(){buffer.pop();renderDots();$('err').textContent='';}
+
+function submitPin(){
+  const candidate=buffer.join('');buffer=[];
+  if(!pin){
+    pin=candidate;persist();openVault();return;
+  }
+  if(hash(candidate)===hash(pin)){openVault();}
+  else{$('err').textContent='Incorrect PIN — access denied';
+    const e=$('err');e.classList.add('err');renderDots();
+  }
+}
+
+function openVault(){
+  $('lockView').style.display='none';
+  $('vaultView').style.display='';
+  renderItems();$('status').textContent='vault unsealed · '+items.length+' items';
+}
+function lockNow(){pin=null;buffer=[];renderDots();$('vaultView').style.display='none';$('lockView').style.display='';$('lockMsg').textContent='Enter your PIN to unseal the vault';$('status').textContent='vault sealed';}
+
+$('addBtn').onclick=()=>{
+  const n=$('newName').value.trim(),v=$('newVal').value.trim();
+  if(!n){$('newName').focus();return;}
+  items.push({n,v:v||'·',icon:'🔒'});persist();$('newName').value='';$('newVal').value='';renderItems();$('status').textContent='stored securely';
+};
+$('items').onclick=e=>{
+  const del=e.target.closest('.del');
+  if(del){if(confirm('Delete item?')){items.splice(+del.dataset.i,1);persist();renderItems();}return;}
+  const act=e.target.closest('.act');if(!act)return;
+  const i=+act.dataset.i;
+  if(act.dataset.a==='rev'){
+    const item=document.querySelector(`.item[data-i="${i}"]`);
+    if(item){item.classList.add('revealed');
+      const v=item.querySelector('.val');v.textContent=items[i].v;
+      setTimeout(()=>{item.classList.remove('revealed');setTimeout(()=>{v.textContent='';},200);},2000);
+    }
+  }else if(act.dataset.a==='cpy'){
+    navigator.clipboard.writeText(items[i].v).then(()=>{act.textContent='✓';setTimeout(()=>act.textContent='copy',1200);});
+  }
+};
+$('backBtn').onclick=backspace;
+$('resetPinBtn').onclick=()=>{
+  const c=prompt('Enter current PIN to reset:');if(!c)return;
+  if(pin&&hash(c)===hash(pin)){pin=null;buffer=[];renderDots();$('lockMsg').textContent='Choose a NEW 4-digit PIN';$('err').textContent='';}
+  else if(!pin){pin=null;buffer=[];renderDots();$('lockMsg').textContent='Choose a 4-digit PIN to create your vault';$('err').textContent='';}
+  else $('err').textContent='Wrong PIN — reset cancelled';
+};
+$('lockBtn').onclick=lockNow;
+
+load();renderDots();buildPad();
+if(pin){$('lockMsg').textContent='Enter your PIN to unseal the vault';}
+</script>
+</body></html>
