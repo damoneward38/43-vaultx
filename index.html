@@ -1,5 +1,6 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="en"><head>
+<link rel="icon" href="data:,"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>VAULTX — Secure Vault</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}
@@ -44,20 +45,21 @@ button.add{background:linear-gradient(135deg,#f59e0b,#fbbf24);color:#070a12;font
 <div class="wrap">
 <div class="card">
 <header><div class="logo">⚿</div><h1>VAULTX<small>SECURE STORAGE</small></h1></header>
+<div role="note" style="margin:8px 14px;padding:10px 14px;background:#252116;color:#fef3c7;border:1px solid #80651e;border-radius:8px;font-size:12px">CLIENT-SIDE VAULT: new entries are encrypted with Web Crypto AES-GCM and a PIN-derived key on this device. A four-digit PIN is weak; do not store high-value secrets. Legacy entries are migrated when unlocked. Data is not synced or recoverable if the PIN is lost.</div>
 <div id="lockView">
 <div class="lock-msg" id="lockMsg">Choose a 4-digit PIN to create your vault</div>
 <div class="dots" id="dots">\n<i></i><i></i><i></i><i></i>\n</div>
 <div class="err" id="err"></div>
 <div class="pin-wrap" id="pad"></div>
 <div class="subrow"><button id="backBtn">⌫ backspace</button><button id="resetPinBtn">reset PIN</button></div>
-<div class="verify" id="verify">End-to-end encrypted locally · PIN never stored in plain text</div>
+<div class="verify" id="verify">AES-GCM encryption on this device · 4-digit PIN is weak; do not store high-value secrets</div>
 </div>
 <div id="vaultView" style="display:none">
 <div class="addrow"><input id="newName" placeholder="item name"><input id="newVal" placeholder="secret value"><button class="add" id="addBtn">+</button></div>
 <div class="items" id="items"></div>
 <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
 <span class="status" id="status">vault unsealed</span>
-<button class="add" id="lockBtn" style="padding:7px 14px;font-size:12px">Lock</button>
+<div style="display:flex;gap:6px"><button class="add" id="changePinBtn" style="padding:7px 10px;font-size:12px">Change PIN</button><button class="add" id="lockBtn" style="padding:7px 14px;font-size:12px">Lock</button></div>
 </div>
 </div>
 </div>
@@ -65,22 +67,32 @@ button.add{background:linear-gradient(135deg,#f59e0b,#fbbf24);color:#070a12;font
 <script>
 const $=id=>document.getElementById(id);
 const KEY='vx_data';
-let pin=null,buffer=[],items=[];
-
-function hash(str){let h=5381;for(let i=0;i<str.length;i++)h=(h*33)^str.charCodeAt(i);return (h>>>0).toString(16);}
+const ITERATIONS=310000;
+let pin=null,buffer=[],items=[],vaultRecord=null,legacyPin=null,legacyBlob=null,changingPin=false;
+const toB64=bytes=>btoa(String.fromCharCode(...bytes));
+const fromB64=value=>Uint8Array.from(atob(value),c=>c.charCodeAt(0));
 function xor(s,k){let out='';for(let i=0;i<s.length;i++)out+=String.fromCharCode(s.charCodeAt(i)^k.charCodeAt(i%k.length));return out;}
 function b64(s){return btoa(unescape(encodeURIComponent(s)));}
 function rb64(s){return decodeURIComponent(escape(atob(s)));}
-
-function load(){
-  try{const raw=JSON.parse(localStorage.getItem(KEY)||'{"pin":null,"blob":null}');
-    pin=raw.pin;items=raw.blob?[]:[];items.splice(0);
-    if(raw.blob&&pin){const dec=rb64(raw.blob);const un=JSON.parse(xor(dec,pin));items=un;}
-  }catch{}
+async function deriveKey(pass,salt){
+  const material=await crypto.subtle.importKey('raw',new TextEncoder().encode(pass),'PBKDF2',false,['deriveKey']);
+  return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:ITERATIONS,hash:'SHA-256'},material,{name:'AES-GCM',length:256},false,['encrypt','decrypt']);
 }
-function persist(){
-  const blob=b64(xor(JSON.stringify(items),pin));
-  localStorage.setItem(KEY,JSON.stringify({pin,blob}));
+function load(){
+  try{
+    const raw=JSON.parse(localStorage.getItem(KEY)||'null');
+    if(raw&&raw.version===2&&raw.alg==='AES-GCM'){vaultRecord=raw;return;}
+    if(raw&&raw.pin&&raw.blob){legacyPin=String(raw.pin);legacyBlob=raw.blob;$('verify').textContent='Legacy weakly-obfuscated vault found. Unlock to migrate it to AES-GCM encryption.';return;}
+  }catch{}
+  vaultRecord=null;legacyPin=null;legacyBlob=null;
+}
+async function persist(){
+  if(!pin)throw new Error('Vault is locked');
+  const salt=crypto.getRandomValues(new Uint8Array(16)),iv=crypto.getRandomValues(new Uint8Array(12));
+  const key=await deriveKey(pin,salt);
+  const encrypted=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,new TextEncoder().encode(JSON.stringify(items)));
+  vaultRecord={version:2,alg:'AES-GCM',kdf:'PBKDF2-SHA-256',iterations:ITERATIONS,salt:toB64(salt),iv:toB64(iv),ciphertext:toB64(new Uint8Array(encrypted))};
+  localStorage.setItem(KEY,JSON.stringify(vaultRecord));
 }
 
 function renderItems(){
@@ -113,15 +125,21 @@ function renderDots(){
 }
 function backspace(){buffer.pop();renderDots();$('err').textContent='';}
 
-function submitPin(){
-  const candidate=buffer.join('');buffer=[];
-  if(!pin){
-    pin=candidate;persist();openVault();return;
-  }
-  if(hash(candidate)===hash(pin)){openVault();}
-  else{$('err').textContent='Incorrect PIN — access denied';
-    const e=$('err');e.classList.add('err');renderDots();
-  }
+async function submitPin(){
+  const candidate=buffer.join('');buffer=[];renderDots();
+  try{
+    if(changingPin){pin=candidate;await persist();changingPin=false;openVault();$('status').textContent='PIN changed; entries re-encrypted locally';$('err').textContent='';return;}
+    if(legacyPin){
+      if(candidate!==legacyPin)throw new Error('Incorrect PIN — access denied');
+      items=JSON.parse(xor(rb64(legacyBlob),candidate));pin=candidate;await persist();legacyPin=null;legacyBlob=null;
+      $('verify').textContent='Legacy vault migrated to AES-GCM. PIN is not stored; data remains browser-local.';openVault();$('status').textContent='Legacy entries migrated to AES-GCM';return;
+    }
+    if(!vaultRecord){pin=candidate;items=[];await persist();openVault();return;}
+    const salt=fromB64(vaultRecord.salt),iv=fromB64(vaultRecord.iv),ciphertext=fromB64(vaultRecord.ciphertext);
+    const key=await deriveKey(candidate,salt);
+    const plain=await crypto.subtle.decrypt({name:'AES-GCM',iv},key,ciphertext);
+    items=JSON.parse(new TextDecoder().decode(plain));pin=candidate;openVault();$('err').textContent='';
+  }catch(e){pin=null;items=[];$('err').textContent='Incorrect PIN or vault data could not be decrypted';$('err').classList.add('err');}
 }
 
 function openVault(){
@@ -129,16 +147,16 @@ function openVault(){
   $('vaultView').style.display='';
   renderItems();$('status').textContent='vault unsealed · '+items.length+' items';
 }
-function lockNow(){pin=null;buffer=[];renderDots();$('vaultView').style.display='none';$('lockView').style.display='';$('lockMsg').textContent='Enter your PIN to unseal the vault';$('status').textContent='vault sealed';}
+function lockNow(){pin=null;items=[];buffer=[];changingPin=false;renderDots();$('vaultView').style.display='none';$('lockView').style.display='';$('lockMsg').textContent='Enter your PIN to unseal the vault';$('status').textContent='vault sealed';}
 
-$('addBtn').onclick=()=>{
+$('addBtn').onclick=async()=>{
   const n=$('newName').value.trim(),v=$('newVal').value.trim();
   if(!n){$('newName').focus();return;}
-  items.push({n,v:v||'·',icon:'🔒'});persist();$('newName').value='';$('newVal').value='';renderItems();$('status').textContent='stored securely';
+  items.push({n,v:v||'·',icon:'🔒'});try{await persist();$('newName').value='';$('newVal').value='';renderItems();$('status').textContent='saved encrypted locally';}catch(e){items.pop();$('status').textContent='Could not encrypt/save: '+e.message;}
 };
-$('items').onclick=e=>{
+$('items').onclick=async e=>{
   const del=e.target.closest('.del');
-  if(del){if(confirm('Delete item?')){items.splice(+del.dataset.i,1);persist();renderItems();}return;}
+  if(del){if(confirm('Delete item?')){items.splice(+del.dataset.i,1);await persist();renderItems();}return;}
   const act=e.target.closest('.act');if(!act)return;
   const i=+act.dataset.i;
   if(act.dataset.a==='rev'){
@@ -153,10 +171,11 @@ $('items').onclick=e=>{
 };
 $('backBtn').onclick=backspace;
 $('resetPinBtn').onclick=()=>{
-  const c=prompt('Enter current PIN to reset:');if(!c)return;
-  if(pin&&hash(c)===hash(pin)){pin=null;buffer=[];renderDots();$('lockMsg').textContent='Choose a NEW 4-digit PIN';$('err').textContent='';}
-  else if(!pin){pin=null;buffer=[];renderDots();$('lockMsg').textContent='Choose a 4-digit PIN to create your vault';$('err').textContent='';}
-  else $('err').textContent='Wrong PIN — reset cancelled';
+  if(vaultRecord||legacyPin){$('err').textContent='Unlock the vault first; PIN changes are available inside the vault.';return;}
+  buffer=[];renderDots();$('lockMsg').textContent='Choose a new 4-digit PIN';$('err').textContent='';
+};
+$('changePinBtn').onclick=()=>{
+  if(!pin)return;changingPin=true;pin=null;buffer=[];renderDots();$('vaultView').style.display='none';$('lockView').style.display='';$('lockMsg').textContent='Choose a NEW 4-digit PIN';$('err').textContent='';
 };
 $('lockBtn').onclick=lockNow;
 
